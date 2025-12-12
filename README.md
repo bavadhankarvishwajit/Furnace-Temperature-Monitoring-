@@ -266,4 +266,4 @@ Annasaheb Dange College of Engineering & Technology, Ashta
 
 ## ⭐ Implementation
 
-![WhatsApp Image 2025-12-06 at 16 40 35_bdc984a5](https://github.com/user-attachments/assets/0999b6e1-eab8-4157-80c9-60ed72938947)
+<img width="700" height="500" alt="image" src="https://github.com/user-attachments/assets/0999b6e1-eab8-4157-80c9-60ed72938947" />
