@@ -1,0 +1,235 @@
+#include "BluetoothSerial.h"
+#include <WiFi.h>
+#include <HTTPClient.h>
+
+BluetoothSerial SerialBT;
+
+const char* remoteDeviceName = "Cyclops246622"; //ENTER YOUR PYROMETER NAME (NOT AMTEX, MUST BE Cyclops)
+const char* pin = "0000"; //KEEP THIS AT IT IS, IF NOT WORKED CHANGE IT = 1234
+
+// WiFi
+const char* ssid = "OPPO A5 Pro 5G h52p"; //ENTER YOUR WIFI NAME
+const char* password = "tmvs5722"; //ENTER PASSWORD
+
+// Server
+const char* serverUrl = "http://10.118.117.41:8000/api/readings"; //JUST CHANGE THE IP ADDRESS OF SERVER
+const char* apiKey = "GVwZoMkyMrkKjlUiF_P3UJ2Wtao6CwqBh8zxRi6zrM0"; // API KEY
+
+String btData = "";
+
+// -------- Peripherals pins ----------
+const int BUZZER_PIN = 13;   // buzzer pin (change if needed)
+const int FAN_PIN = 12;      // fan control pin (change if needed)
+
+// -------- Fan schedule (millis) ----------
+const unsigned long COOL_INTERVAL_MS  = 15UL * 60UL * 1000UL; // every 15 minutes
+const unsigned long COOL_DURATION_MS  = 10UL * 60UL * 1000UL; // run for 10 minutes
+
+unsigned long lastFanCycleMillis = 0; // tracks start of last cycle
+bool fanRunning = false;
+unsigned long fanStartMillis = 0;
+
+// ------------------- FILTER FUNCTION -------------------
+bool isValidReading(String data) {
+  data.trim();
+
+  if (data.indexOf("*") != -1) return false;
+  if (data.indexOf("^^^") != -1) return false;
+  if (data.indexOf("AT") != -1) return false;
+
+  if (data == "D0CI+09999") return false;
+  if (data == "D0CI+19999") return false;
+  if (data == "D0CI+29999") return false;
+
+  return true;
+}
+
+// ------------------- NUMBER EXTRACTOR -------------------
+String extractNumbers(String data) {
+  String result = "";
+  for (int i = 0; i < data.length(); i++) {
+    if (isDigit(data[i])) {
+      result += data[i];
+    }
+  }
+  return result;   // returns numbers only
+}
+
+// ------------- BUZZER ALERT FUNCTION -------------
+void buzzerAlert(int value) {
+  if (value < 1200) {
+    Serial.println("🔊 LOW ALERT: Value below 1200");
+    tone(BUZZER_PIN, 1000, 300);   // 1000 Hz for 300ms
+  }
+  else if (value > 1500) {
+    Serial.println("🔊 HIGH ALERT: Value above 1500");
+    tone(BUZZER_PIN, 2000, 300);   // 2000 Hz for 300ms
+  }
+  else {
+    noTone(BUZZER_PIN);   // Between 1200–1500 → No buzzer
+  }
+}
+
+// ------------- FAN CONTROL helpers -------------
+void fanOn() {
+  digitalWrite(FAN_PIN, HIGH);
+  fanRunning = true;
+  fanStartMillis = millis();
+  Serial.println("🆒 Fan turned ON");
+}
+
+void fanOff() {
+  digitalWrite(FAN_PIN, LOW);
+  fanRunning = false;
+  // schedule next cycle from now
+  lastFanCycleMillis = millis();
+  Serial.println("🛑 Fan turned OFF");
+}
+
+// Check and update fan state (call frequently from loop)
+void handleFanScheduler() {
+  unsigned long now = millis();
+
+  if (!fanRunning) {
+    // If first run, initialize lastFanCycleMillis so fan will turn on after COOL_INTERVAL_MS
+    // If lastFanCycleMillis is zero, start it now so first ON happens after interval
+    if (lastFanCycleMillis == 0) {
+      lastFanCycleMillis = now;
+    }
+    // Time to turn fan on?
+    if ((now - lastFanCycleMillis) >= COOL_INTERVAL_MS) {
+      fanOn();
+    }
+  } else {
+    // Fan is running — check if duration has passed
+    if ((now - fanStartMillis) >= COOL_DURATION_MS) {
+      fanOff();
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  // pins
+  pinMode(BUZZER_PIN, OUTPUT);
+  noTone(BUZZER_PIN);
+  pinMode(FAN_PIN, OUTPUT);
+  digitalWrite(FAN_PIN, LOW); // ensure fan is off
+
+  // WiFi
+  Serial.print("Connecting to WiFi");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n✅ WiFi connected!");
+  Serial.print("📶 IP: ");
+  Serial.println(WiFi.localIP());
+
+  // Bluetooth
+  if (!SerialBT.begin("ESP32_Client", true)) {
+    Serial.println("❌ Bluetooth init failed!");
+    return;
+  }
+  Serial.println("✅ Bluetooth initialized.");
+
+  // setPin accepts single argument; if device doesn't require PIN, you can skip
+  if (SerialBT.setPin(pin)) {
+    Serial.println("🔒 Bluetooth PIN set.");
+  }
+
+  Serial.println("Connecting to Bluetooth device...");
+  if (SerialBT.connect(remoteDeviceName)) {
+    Serial.println("✅ Bluetooth Connected!");
+  } else {
+    Serial.println("❌ Bluetooth connection failed!");
+  }
+
+  // initialize fan timer so first ON occurs after COOL_INTERVAL_MS
+  lastFanCycleMillis = millis();
+}
+
+void loop() {
+  // handle fan scheduler each loop (non-blocking)
+  handleFanScheduler();
+
+  if (SerialBT.connected()) {
+    while (SerialBT.available()) {
+      char c = SerialBT.read();
+
+      if (c == '\n') {
+        btData.trim();
+
+        if (btData.length() > 0) {
+          Serial.print("📥 BT Raw: ");
+          Serial.println(btData);
+
+          // FILTER
+          if (!isValidReading(btData)) {
+            Serial.println("⛔ BLOCKED: Invalid data");
+          } else {
+            // Extract digits
+            String numbers = extractNumbers(btData);
+
+            if (numbers.length() == 0) {
+              Serial.println("⛔ BLOCKED: No digits found");
+            } else {
+              Serial.print("🔢 Extracted Numbers: ");
+              Serial.println(numbers);
+
+              int value = numbers.toInt();
+
+              // BUZZER ALERT CHECK
+              buzzerAlert(value);
+
+              // Send to server
+              sendToServer(numbers);
+            }
+          }
+        }
+        btData = "";
+      } else {
+        btData += c;
+      }
+    }
+  } else {
+    Serial.println("⚠ BT disconnected. Retrying...");
+    SerialBT.connect(remoteDeviceName);
+    delay(2000);
+  }
+
+  // small delay to avoid tight loop; fan scheduler uses millis() so safe
+  delay(20);
+}
+
+// ------------------- POST TO SERVER -------------------
+void sendToServer(String data) {
+  if (WiFi.status() != WL_CONNECTED) {
+    WiFi.reconnect();
+    delay(1000);
+    return;
+  }
+
+  HTTPClient http;
+  http.begin(serverUrl);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("x-api-key", apiKey);
+
+  String jsonData = "{\"Temperature\":\"" + data + "\"}";
+
+  Serial.print("📤 Sending JSON: ");
+  Serial.println(jsonData);
+
+  int code = http.POST(jsonData);
+
+  if (code > 0) {
+    Serial.printf("✅ Response %d: %s\n", code, http.getString().c_str());
+  } else {
+    Serial.printf("❌ POST Error: %s\n", http.errorToString(code).c_str());
+  }
+
+  http.end();
+}
